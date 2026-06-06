@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>Atividade 3 - WebGPU vs CPU</title>
+</head>
+<body>
+    <h1>Resultados do Benchmark (Olhe o Console do Navegador - F12)</h1>
+    <p>Abra o console (F12) para ver os testes rodando em tempo real.</p>
+
+    <script type="module">
+        // --- CÓDIGO DO SHADER (WGSL) ---
+        const shaderCode = `
+          @group(0) @binding(0) var<storage, read> matrixA : array<f32>;
+          @group(0) @binding(1) var<storage, read> matrixB : array<f32>;
+          @group(0) @binding(2) var<storage, read_write> matrixResult : array<f32>;
+          @uniform id : vec2<f32>; // armazena o tamanho da matriz (N)
+
+          @compute @workgroup_size(8, 8)
+          fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
+            let numRows = u32(id.x);
+            let numCols = u32(id.y);
+            let row = global_id.x;
+            let col = global_id.y;
+
+            if (row >= numRows || col >= numCols) { return; }
+
+            var result = 0.0;
+            for (var i = 0u; i < numRows; i = i + 1u) {
+              result = result + matrixA[row * numRows + i] * matrixB[i * numCols + col];
+            }
+            matrixResult[row * numCols + col] = result;
+          }
+        `;
+
+        // --- MULTIPLICAÇÃO NA CPU ---
+        function multiplyCPU(size, a, b, result) {
+            for (let i = 0; i < size; i++) {
+                for (let j = 0; j < size; j++) {
+                    let sum = 0;
+                    for (let k = 0; k < size; k++) {
+                        sum += a[i * size + k] * b[k * size + j];
+                    }
+                    result[i * size + j] = sum;
+                }
+            }
+        }
+
+        // --- FUNÇÃO PRINCIPAL DE BENCHMARK ---
+        async function runBenchmark(size) {
+            console.log(`Rodando para matriz ${size}x${size}...`);
+            const numElements = size * size;
+            
+            // Inicializa matrizes com números aleatórios
+            const firstMatrix = new Float32Array(numElements).map(() => Math.random());
+            const secondMatrix = new Float32Array(numElements).map(() => Math.random());
+            const cpuResult = new Float32Array(numElements);
+
+            // 1. TESTE CPU
+            const startCPU = performance.now();
+            multiplyCPU(size, firstMatrix, secondMatrix, cpuResult);
+            const endCPU = performance.now();
+            const timeCPU = endCPU - startCPU;
+
+            // 2. TESTE GPU
+            const adapter = await navigator.gpu.requestAdapter();
+            const device = await adapter.requestDevice();
+
+            // Preparando os buffers da GPU
+            const gpuBufferFirstMatrix = device.createBuffer({ mappedAtCreation: true, size: firstMatrix.byteLength, usage: GPUBufferUsage.STORAGE });
+            new Float32Array(gpuBufferFirstMatrix.getMappedRange()).set(firstMatrix);
+            gpuBufferFirstMatrix.unmap();
+
+            const gpuBufferSecondMatrix = device.createBuffer({ mappedAtCreation: true, size: secondMatrix.byteLength, usage: GPUBufferUsage.STORAGE });
+            new Float32Array(gpuBufferSecondMatrix.getMappedRange()).set(secondMatrix);
+            gpuBufferSecondMatrix.unmap();
+
+            const gpuBufferResultMatrix = device.createBuffer({ size: cpuResult.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+            const sizeBuffer = device.createBuffer({ mappedAtCreation: true, size: 8, usage: GPUBufferUsage.UNIFORM });
+            new Float32Array(sizeBuffer.getMappedRange()).set([size, size]);
+            sizeBuffer.unmap();
+
+            // Pipeline e Bind Groups
+            const computePipeline = device.createComputePipeline({ layout: 'auto', compute: { module: device.createShaderModule({ code: shaderCode }), entryPoint: 'main' } });
+            const bindGroup = device.createBindGroup({
+                layout: computePipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: gpuBufferFirstMatrix } },
+                    { binding: 1, resource: { buffer: gpuBufferSecondMatrix } },
+                    { binding: 2, resource: { buffer: gpuBufferResultMatrix } },
+                    { binding: 3, resource: { buffer: sizeBuffer } }
+                ]
+            });
+
+            // Execução dos comandos da GPU e Cronometragem
+            const startGPU = performance.now();
+            const commandEncoder = device.createCommandEncoder();
+            const passEncoder = commandEncoder.beginComputePass();
+            passEncoder.setPipeline(computePipeline);
+            passEncoder.setBindGroup(0, bindGroup);
+            const workgroupCount = Math.ceil(size / 8);
+            passEncoder.dispatchWorkgroups(workgroupCount, workgroupCount);
+            passEncoder.end();
+            device.queue.submit([commandEncoder.finish()]);
+
+            // EXIGÊNCIA DA ATIVIDADE: Garantir que a GPU terminou antes de parar o relógio
+            await device.queue.onSubmittedWorkDone();
+            const endGPU = performance.now();
+            const timeGPU = endGPU - startGPU;
+
+            const speedup = timeCPU / timeGPU;
+
+            return { size: `${size}x${size}`, cpu: timeCPU.toFixed(2), gpu: timeGPU.toFixed(2), speedup: speedup.toFixed(2) };
+        }
+
+        // Rodar para os 3 tamanhos sequencialmente
+        async function init() {
+            const r128 = await runBenchmark(128);
+            const r512 = await runBenchmark(512);
+            const r1024 = await runBenchmark(1044); // Usando 1024 de tamanho real aproximado
+            
+            console.clear();
+            console.log("--- RESULTADOS FINAIS PARA SUA TABELA ---");
+            console.table([r128, r512, r1024]);
+        }
+
+        init();
+    </script>
+</body>
+</html>
